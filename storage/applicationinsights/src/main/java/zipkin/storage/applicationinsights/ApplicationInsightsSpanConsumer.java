@@ -37,6 +37,7 @@ final class ApplicationInsightsSpanConsumer implements StorageAdapters.SpanConsu
   private static TelemetryClient telemetry = new TelemetryClient();
   private static Gson gson = new Gson();
   private String namespace;
+  private final int appInsightsCustomdimensionLimit = 800;
 
   public ApplicationInsightsSpanConsumer(String instrumentationKey) {
     TelemetryConfiguration.getActive().setInstrumentationKey(instrumentationKey);
@@ -82,6 +83,10 @@ final class ApplicationInsightsSpanConsumer implements StorageAdapters.SpanConsu
         if (timestamp != null) {
           jsonElement.getAsJsonObject().addProperty("timestamp", Long.toString(timestamp));
         }
+        else
+        {
+          timestamp = 0L;
+        }
         String res = gson.toJson(jsonElement);
         String msg = "{ \"Span\":" + res + "}";
         telemetry.trackTrace(msg, SeverityLevel.Critical, spanProps);
@@ -89,21 +94,39 @@ final class ApplicationInsightsSpanConsumer implements StorageAdapters.SpanConsu
         //data model changes
         telemetry.getContext().getOperation().setId(Util.toLowerHex(span.traceIdHigh, span.traceId));
         telemetry.getContext().getOperation().setName(span.name);
-        telemetry.getContext().getProperties().put("zipkin-span", res.replace("\"", "\\\""));
-        telemetry.getContext().getProperties().put("namespace", namespace);
+        String zipkinSpans = res.replace("\"", "\\\"");
+        System.out.println("zipkinSpans: " + zipkinSpans);
 
+        for(int index = 0; index < zipkinSpans.length(); index += appInsightsCustomdimensionLimit)
+        {
+          int endIndex = Math.min(index+appInsightsCustomdimensionLimit, zipkinSpans.length());
+          telemetry.getContext().getProperties().put("zipkin-span" + index/appInsightsCustomdimensionLimit, zipkinSpans.substring(index, endIndex));
+        }
+        telemetry.getContext().getProperties().put("namespace", namespace);
+        telemetry.getContext().getProperties().put("traceId", traceId);
+        telemetry.getContext().getProperties().put("traceIdHigh", traceIdHigh);
+
+        boolean isSpanTracked = false;
         for (Annotation annotation : span.annotations) {
 
           if (annotation.value.equalsIgnoreCase(Constants.CLIENT_SEND)) {
             String spanName = span.name !=null && !span.name.isEmpty()?span.name:Constants.CLIENT_SEND;
             telemetry.trackDependency(spanName, "request", new Duration(span.duration==null?0L:span.duration/1000),
                 true);
+            isSpanTracked = true;
           }
           else if(annotation.value.equalsIgnoreCase(Constants.SERVER_SEND)){
             String spanName = span.name !=null && !span.name.isEmpty()?span.name:Constants.SERVER_RECV;
             telemetry.trackRequest(new RequestTelemetry(spanName, new Date(timestamp), span.duration==null?0L:span.duration/1000,
                 "Ok",true));
+            isSpanTracked = true;
           }
+        }
+        if(!isSpanTracked)
+        {
+          String spanName = span.name !=null && !span.name.isEmpty()?span.name:Constants.SERVER_RECV;
+          telemetry.trackDependency(spanName, "request", new Duration(span.duration==null?0L:span.duration/1000),
+              true);
         }
       }
 
